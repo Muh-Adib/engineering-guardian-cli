@@ -12,7 +12,7 @@ program.name('eg').description('Engineering Guardian CLI for Next.js and Prisma 
 program.command('init').description('Create Guardian config and safely update the managed AGENTS.md section').action(() => {
   const result = initProject(process.cwd());
   console.log(`Initialized Guardian config at ${result.configPath}`);
-  console.log(`Updated managed instructions at ${result.agentsPath}`);
+  console.log(`Updated AGENTS instructions at ${result.agentsPath}`);
 });
 
 program.command('doctor').description('Inspect project stack and environment').action(() => {
@@ -21,10 +21,10 @@ program.command('doctor').description('Inspect project stack and environment').a
 
 program.command('scan')
   .option('--changed', 'scan files changed in the working tree')
-  .option('--base <ref>', 'scan files changed from a Git base ref (requires --changed)')
-  .option('--path <paths...>', 'scan only the specified file(s) or directory(s)')
+  .option('--base <ref>', 'scan files changed since base ref (requires --changed)')
+  .option('--path <paths...>', 'scan only selected path(s)')
   .option('--format <format>', 'text, json, or sarif', 'text')
-  .option('--out <file>', 'write report to a file instead of stdout')
+  .option('--out <file>', 'write report to file instead of stdout')
   .description('Run deterministic repository checks')
   .action((options) => {
     if (!['text', 'json', 'sarif'].includes(options.format)) {
@@ -37,11 +37,15 @@ program.command('scan')
       process.exitCode = 2;
       return;
     }
+
     try {
-      const result = runScan({ cwd: process.cwd(), changed: options.changed, base: options.base, paths: options.path });
+      const result = runScan({ cwd: process.cwd(), changed: options.changed, base: options.base, paths: options.path, format: options.format });
       const report = renderScanResult(result, options.format);
-      if (options.out) writeFileSync(resolve(process.cwd(), options.out), `${report}\n`, 'utf8');
-      else console.log(report);
+      if (options.out) {
+        writeFileSync(resolve(process.cwd(), options.out), `${report}\n`, 'utf8');
+      } else {
+        console.log(report);
+      }
       if (!result.passed) process.exitCode = 1;
     } catch (error) {
       console.error(`Scan failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -60,7 +64,7 @@ program.command('explain').requiredOption('--id <id>', 'finding ID to explain').
   console.log(`${finding.title} (${finding.ruleId})\n${finding.description}\nEvidence: ${finding.evidence}\nImpact: ${finding.impact}\nRecommendation: ${finding.recommendation}`);
 });
 
-program.command('fix').requiredOption('--id <id>', 'finding ID to propose a repair for').option('--apply', 'request application (not supported without a configured repair provider and approval flow)').description('Show safe repair status').action(({ id, apply }) => {
+program.command('fix').requiredOption('--id <id>', 'finding ID to propose a repair for').option('--apply', 'apply approved patch (currently preview only)').description('Show repair guidance without writing files').action(({ id, apply }) => {
   const result = runScan({ cwd: process.cwd() });
   const finding = result.findings.find((item) => item.id === id);
   if (!finding) {
@@ -68,14 +72,16 @@ program.command('fix').requiredOption('--id <id>', 'finding ID to propose a repa
     process.exitCode = 1;
     return;
   }
-  console.log(`Repair for ${id}: ${finding.recommendation}`);
-  console.log(apply ? 'Patch application is not yet implemented; no files were changed.' : 'Preview only; no files were changed.');
+  console.log(`Repair proposal for ${id}: ${finding.recommendation}`);
+  console.log(apply ? 'Patch application is disabled in this MVP; no files were changed.' : 'Preview only; no files were changed.');
 });
 
 program.command('verify').description('Show recognized project quality scripts without executing them').action(() => {
   const result = verifyProject(process.cwd());
   console.log(result.status);
-  for (const command of result.commands) console.log(`${command.name}: ${command.script}`);
+  for (const command of result.commands) {
+    console.log(`${command.name}: ${command.script}`);
+  }
   console.log(result.message);
 });
 
