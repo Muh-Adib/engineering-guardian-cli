@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "project": {
+    "framework": "auto",
+    "orm": "auto"
+  },
+  "scan": {
+    "include": ["src/**/*.{ts,tsx,js,jsx}", "app/**/*.{ts,tsx,js,jsx}", "pages/**/*.{ts,tsx,js,jsx}"],
+    "exclude": [
+      "node_modules/**",
+      ".next/**",
+      "dist/**",
+      "coverage/**",
+      ".guardian/**",
+      "**/*.generated.*"
+    ]
+  },
+  "gate": {
+    "failOn": ["P0", "P1"],
+    "minimumConfidence": "high",
+    "changedFilesOnlyInCI": true
+  },
+  "ai": {
+    "enabled": false,
+    "sendCode": "on-demand"
+  },
+  "safety": {
+    "allowDependencyChanges": false,
+    "allowSchemaOrMigrationChanges": false,
+    "allowArbitraryCommands": false
+  }
+}

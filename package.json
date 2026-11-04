@@ -1,0 +1,29 @@
+{
+  "name": "engineering-guardian-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "eg": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "doctor": "tsx src/index.ts doctor",
+    "scan": "tsx src/index.ts scan",
+    "verify": "tsx src/index.ts verify",
+    "lint": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests"
+  },
+  "dependencies": {
+    "chalk": "^5.3.1",
+    "commander": "^12.1.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "tsx": "^4.19.1",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.6"
+  }
+}
