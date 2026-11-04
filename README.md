@@ -11,7 +11,7 @@ node dist/index.js doctor
 node dist/index.js scan --format json
 ```
 
-Initialize project policy with `eg init` (or `npx tsx src/index.ts init` while developing). This creates `.guardian/config.json` and manages only the marked section of `AGENTS.md`.
+Initialize project policy with `eg init` (or `npx tsx src/index.ts init` while developing). This creates `.guardian/config.json` (never overwriting an existing one) and manages only the marked section of `AGENTS.md`.
 
 ## Commands
 
@@ -20,13 +20,13 @@ eg doctor
 eg scan
 eg scan --changed
 eg scan --changed --base origin/main --format sarif --out guardian.sarif
-eg scan --path src/app/api --format json
+eg scan --path src/app/api --format json   # directories are expanded recursively
 eg explain --id EG-001-<fingerprint>
 eg fix --id EG-001-<fingerprint>   # guidance/preview only
 eg verify                         # discovers scripts; does not execute them
 ```
 
-`scan` accepts `text`, `json`, or `sarif`. Exit codes: `0` scan passes configured gate, `1` findings breach the gate (or a requested finding is absent), `2` invalid options or scan error. `--base` requires `--changed`. Git is invoked with fixed argument arrays; no shell command from the project or model is executed.
+`scan` accepts `text`, `json`, or `sarif`. Exit codes: `0` scan passes configured gate, `1` findings breach the gate (or a requested finding is absent), `2` invalid options or scan error. `--base` requires `--changed`. `--changed` covers staged and unstaged changes (`git diff HEAD`); use `--base` for the committed CI flow. Paths that do not exist, fall outside the project, or are removed by include/exclude filters are reported as warnings on stderr instead of being silently dropped. Git is invoked with fixed argument arrays; no shell command from the project or model is executed.
 
 ## Current rules
 
@@ -36,18 +36,23 @@ eg verify                         # discovers scripts; does not execute them
 | EG-002 | `as unknown as T` type assertion candidate | P2 / medium confidence |
 | EG-003 | Prisma Client query inside loop candidate | P2 / medium confidence |
 
-These are deliberately small heuristics, not an AST-based proof system. Review findings in context. Some syntax edge cases may be missed; use the repository's ESLint, TypeScript, tests, and security tools as complementary checks.
+Matching runs against a masked copy of each file in which string literals, template literals, regex literals, and comments are blanked out, so patterns inside strings or comments do not fire. These are deliberately small heuristics, not an AST-based proof system. Review findings in context. Some syntax edge cases may be missed; use the repository's ESLint, TypeScript, tests, and security tools as complementary checks.
 
 ## Policy
 
-`.guardian/config.json` controls scan paths and gate severity/confidence. The default gate fails on high-confidence P0/P1 only. Scan is read-only except when `--out` writes a report and `eg init` creates/updates Guardian configuration/instructions. `verify` only reports discovered scripts and does not execute them.
+`.guardian/config.json` controls scan paths and gate severity/confidence. The default gate fails on high-confidence P0/P1 only. Scan is read-only except when `--out` writes a report and `eg init` creates/updates Guardian configuration/instructions; `eg init` keeps an existing config untouched. `verify` only reports discovered scripts and does not execute them.
 
 ## Safety and limitations
 
 - AI is disabled and no AI repair provider is implemented yet.
 - `eg fix` only displays guidance; even `--apply` does not write files.
 - No database connections, migrations, dependency installs, or arbitrary shell commands are performed.
-- `--changed` scans Git diff paths; untracked files are not included by `git diff`.
+- `--changed` scans `git diff HEAD` paths; untracked files are not included.
+- Literal masking is heuristic, not a parser; exotic regex/division ambiguities remain possible.
 - SARIF support is basic; validate against your CI platform before relying on it as a compliance artifact.
 
 See [the PRD](engineering-guardian-prd.md) and [competitive gap analysis](docs/competitive-gap-analysis.md).
+
+## License
+
+[MIT](LICENSE)

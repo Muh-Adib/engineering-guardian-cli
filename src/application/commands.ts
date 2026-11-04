@@ -2,7 +2,8 @@ import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { detectProjectProfile } from '../discovery/project-profile.js';
-import { getChangedFiles, runDeterministicScan } from '../analyzers/rule-engine.js';
+import { runDeterministicScan } from '../analyzers/rule-engine.js';
+import { getChangedFiles } from '../core/git.js';
 import { loadConfig, scaffoldGuardianConfig } from '../core/config.js';
 import type { Confidence, Finding, Severity } from '../core/types.js';
 import { toSarif } from '../reporters/sarif.js';
@@ -57,22 +58,24 @@ export function runScan(options: RunScanOptions | string = {}) {
   const files = normalized.paths?.length
     ? normalized.paths
     : normalized.changed ? getChangedFiles(cwd, normalized.base) : undefined;
-  const findings = runDeterministicScan({ cwd, files, include: config.scan.include, exclude: config.scan.exclude });
+  const warnings: string[] = [];
+  const findings = runDeterministicScan({ cwd, files, include: config.scan.include, exclude: config.scan.exclude, warnings });
   const summary = summarize(findings);
   const failOn = config.gate.failOn;
   const minimumConfidence = confidenceRank[config.gate.minimumConfidence];
   const blockingFindings = findings.filter((finding) => failOn.includes(finding.severity) && confidenceRank[finding.confidence] >= minimumConfidence);
-  return { findings, summary, blockingFindings, passed: blockingFindings.length === 0 };
+  return { findings, summary, blockingFindings, warnings, passed: blockingFindings.length === 0 };
 }
 
 export function renderScanResult(result: ReturnType<typeof runScan>, format: RunScanOptions['format'] = 'text'): string {
   if (format === 'json') {
-    return JSON.stringify({ findings: result.findings, summary: result.summary, gate: { passed: result.passed, blockingCount: result.blockingFindings.length } }, null, 2);
+    return JSON.stringify({ findings: result.findings, summary: result.summary, gate: { passed: result.passed, blockingCount: result.blockingFindings.length }, warnings: result.warnings }, null, 2);
   }
   if (format === 'sarif') {
     return toSarif(result.findings);
   }
   const lines = [`Engineering Guardian scan: ${result.summary.total} finding(s)`, `Gate: ${result.passed ? 'PASS' : 'FAIL'}`];
+  for (const warning of result.warnings) lines.push(`Warning: ${warning}`);
   for (const finding of result.findings) {
     lines.push(`${finding.id} [${finding.severity}/${finding.confidence}] ${finding.title} — ${finding.location.file}:${finding.location.line}`);
     lines.push(`  ${finding.recommendation}`);
@@ -81,23 +84,35 @@ export function renderScanResult(result: ReturnType<typeof runScan>, format: Run
   return lines.join('\n');
 }
 
+// Backticks inside the block below must be escaped (\`); an unescaped backtick
+// terminates the template literal and breaks the build.
+const MANAGED_BLOCK = `<!-- ENGINEERING_GUARDIAN:START -->
+## Engineering Guardian
+
+- Run \`eg doctor\` to inspect the detected project stack and versions.
+- Run \`eg scan --changed\` when reviewing changed files.
+- Treat findings according to \`.guardian/config.json\`; contextual findings are not proof of a defect.
+- Keep repair preview-first and require explicit human approval before any write.
+- Do not claim verification succeeded unless the corresponding checks were actually run.
+<!-- ENGINEERING_GUARDIAN:END -->`;
+
 export function initProject(cwd = process.cwd()) {
-  const configPath = scaffoldGuardianConfig(cwd);
+  const scaffold = scaffoldGuardianConfig(cwd);
   const agentsPath = resolve(cwd, 'AGENTS.md');
-  const start = '<!-- ENGINEERING_GUARDIAN:START -->';
-  const end = '<!-- ENGINEERING_GUARDIAN:END -->';
-  const block = `${start}\n## Engineering Guardian\n\n- Run \`eg doctor\` to inspect the detected stack.\n- Run \`eg scan --changed\` before reviewing a change.\n- Treat scan findings according to `.guardian/config.json`; contextual findings are not proof of a defect.\n- AI repair must remain preview-first and require explicit human approval.\n${end}`;
   const existing = existsSync(agentsPath) ? readFileSync(agentsPath, 'utf8') : '';
-  const startIndex = existing.indexOf(start);
-  const endIndex = existing.indexOf(end);
+  const startIndex = existing.indexOf('<!-- ENGINEERING_GUARDIAN:START -->');
   let updated: string;
-  if (startIndex >= 0 && endIndex >= startIndex) {
-    updated = `${existing.slice(0, startIndex)}${block}${existing.slice(endIndex + end.length)}`;
+  if (startIndex >= 0) {
+    // The managed region is owned by Guardian: replace everything from the
+    // START marker onward. This also heals files with a missing END marker.
+    const base = existing.slice(0, startIndex);
+    updated = `${base.trimEnd()}${base.trim() ? '\n\n' : ''}${MANAGED_BLOCK}\n`;
   } else {
-    updated = `${existing.trimEnd()}${existing.trim() ? '\n\n' : ''}${block}\n`;
+    const cleaned = existing.replace(/<!-- ENGINEERING_GUARDIAN:END -->\s*/g, '');
+    updated = `${cleaned.trimEnd()}${cleaned.trim() ? '\n\n' : ''}${MANAGED_BLOCK}\n`;
   }
   writeFileSync(agentsPath, updated, 'utf8');
-  return { configPath, agentsPath };
+  return { configPath: scaffold.path, agentsPath, configCreated: scaffold.created };
 }
 
 export function verifyProject(cwd = process.cwd()) {

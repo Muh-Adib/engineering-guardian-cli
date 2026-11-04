@@ -7,17 +7,24 @@ const levelFor = (severity: Finding['severity']): 'error' | 'warning' | 'note' =
 };
 
 export function toSarif(findings: Finding[]): string {
-  const rules = [...new Set(findings.map((finding) => finding.ruleId))].map((id) => ({
-    id,
-    shortDescription: { text: findings.find((finding) => finding.ruleId === id)?.title ?? id }
-  }));
+  const ruleIndex = new Map<string, { id: string; shortDescription: { text: string } }>();
+  for (const finding of findings) {
+    if (!ruleIndex.has(finding.ruleId)) {
+      ruleIndex.set(finding.ruleId, { id: finding.ruleId, shortDescription: { text: finding.title } });
+    }
+  }
   const results = findings.map((finding) => ({
     ruleId: finding.ruleId,
     level: levelFor(finding.severity),
     message: { text: `${finding.title}: ${finding.description}` },
     locations: [{ physicalLocation: {
-      artifactLocation: { uri: finding.location.file },
-      region: { startLine: finding.location.line, startColumn: finding.location.column ?? 1 }
+      artifactLocation: { uri: encodeURI(finding.location.file) },
+      region: {
+        startLine: finding.location.line,
+        startColumn: finding.location.column ?? 1,
+        ...(finding.location.endLine ? { endLine: finding.location.endLine } : {}),
+        ...(finding.location.endColumn ? { endColumn: finding.location.endColumn } : {})
+      }
     } }],
     partialFingerprints: { guardianStableId: finding.id },
     properties: {
@@ -35,7 +42,7 @@ export function toSarif(findings: Finding[]): string {
       tool: { driver: {
         name: 'Engineering Guardian',
         informationUri: 'https://github.com/Muh-Adib/engineering-guardian-cli',
-        rules
+        rules: [...ruleIndex.values()]
       } },
       results
     }]

@@ -1,17 +1,21 @@
 #!/usr/bin/env node
 
-import { writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { createRequire } from 'node:module';
 import { Command } from 'commander';
 
 import { initProject, renderScanResult, runDoctor, runScan, verifyProject } from './application/commands.js';
 
+const require = createRequire(import.meta.url);
+const { version } = require('../package.json') as { version: string };
+
 const program = new Command();
-program.name('eg').description('Engineering Guardian CLI for Next.js and Prisma quality analysis').version('0.2.0');
+program.name('eg').description('Engineering Guardian CLI for Next.js and Prisma quality analysis').version(version);
 
 program.command('init').description('Create Guardian config and safely update the managed AGENTS.md section').action(() => {
   const result = initProject(process.cwd());
-  console.log(`Initialized Guardian config at ${result.configPath}`);
+  console.log(`${result.configCreated ? 'Created' : 'Kept existing'} Guardian config at ${result.configPath}`);
   console.log(`Updated managed instructions at ${result.agentsPath}`);
 });
 
@@ -20,7 +24,7 @@ program.command('doctor').description('Inspect project stack and environment').a
 });
 
 program.command('scan')
-  .option('--changed', 'scan files changed in the working tree')
+  .option('--changed', 'scan files changed in the working tree (staged and unstaged)')
   .option('--base <ref>', 'scan files changed from a Git base ref (requires --changed)')
   .option('--path <paths...>', 'scan only the specified file(s) or directory(s)')
   .option('--format <format>', 'text, json, or sarif', 'text')
@@ -39,9 +43,15 @@ program.command('scan')
     }
     try {
       const result = runScan({ cwd: process.cwd(), changed: options.changed, base: options.base, paths: options.path });
+      for (const warning of result.warnings) console.error(`[eg] Warning: ${warning}`);
       const report = renderScanResult(result, options.format);
-      if (options.out) writeFileSync(resolve(process.cwd(), options.out), `${report}\n`, 'utf8');
-      else console.log(report);
+      if (options.out) {
+        const target = resolve(process.cwd(), options.out);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, `${report}\n`, 'utf8');
+      } else {
+        console.log(report);
+      }
       if (!result.passed) process.exitCode = 1;
     } catch (error) {
       console.error(`Scan failed: ${error instanceof Error ? error.message : String(error)}`);

@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { basename, extname, join, relative, resolve, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 
 import { detectProjectProfile } from '../discovery/project-profile.js';
+import { maskLiteralsAndComments } from '../core/mask.js';
 import type { Confidence, Finding, GuardianRule, ProjectProfile, RuleContext, Severity } from '../core/types.js';
 
 const DEFAULT_EXCLUSIONS = ['node_modules', '.next', 'dist', 'build', 'coverage', '.git', '.guardian'];
@@ -15,11 +15,13 @@ export interface ScanOptions {
   include?: string[];
   exclude?: string[];
   project?: ProjectProfile;
+  /** Receives non-fatal scan warnings (missing paths, fully filtered input). */
+  warnings?: string[];
 }
 
-function findingId(ruleId: string, file: string, evidence: string, occurrence: number): string {
+function findingId(ruleId: string, file: string, evidence: string, duplicateIndex: number): string {
   const fingerprint = createHash('sha256')
-    .update(`${ruleId}\0${file}\0${evidence.replace(/\s+/g, ' ').trim()}\0${occurrence}`)
+    .update(`${ruleId}\0${file}\0${evidence.replace(/\s+/g, ' ').trim()}\0${duplicateIndex}`)
     .digest('hex')
     .slice(0, 16);
   return `${ruleId}-${fingerprint}`;
@@ -41,13 +43,32 @@ function matchingBrace(source: string, open: number): number {
   return -1;
 }
 
+function matchingParen(source: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '(') depth += 1;
+    if (source[index] === ')' && --depth === 0) return index;
+  }
+  return -1;
+}
+
+/** Counts how many prior findings in this file share the exact same evidence, so
+ *  only true duplicates disambiguate the fingerprint. Removing an unrelated
+ *  finding therefore never shifts another finding's stable ID. */
+function duplicateIndexOf(seen: Map<string, number>, evidence: string): number {
+  const next = seen.get(evidence) ?? 0;
+  seen.set(evidence, next + 1);
+  return next;
+}
+
 function makeFinding(input: {
   ruleId: string;
   file: string;
   content: string;
   offset: number;
+  endOffset: number;
   evidence: string;
-  occurrence: number;
+  duplicateIndex: number;
   title: string;
   description: string;
   severity: Severity;
@@ -58,15 +79,16 @@ function makeFinding(input: {
   fixMode: Finding['fixMode'];
 }): Finding {
   const location = locationAt(input.file, input.content, input.offset);
+  const endLocation = locationAt(input.file, input.content, Math.max(input.endOffset - 1, input.offset));
   return {
-    id: findingId(input.ruleId, input.file, input.evidence, input.occurrence),
+    id: findingId(input.ruleId, input.file, input.evidence, input.duplicateIndex),
     ruleId: input.ruleId,
     title: input.title,
     description: input.description,
     severity: input.severity,
     confidence: input.confidence,
     category: input.category,
-    location: { ...location, endLine: location.line },
+    location: { ...location, endLine: endLocation.line, endColumn: (endLocation.column ?? 1) + (input.endOffset - 1 - input.offset) },
     evidence: input.evidence.trim().slice(0, 240),
     impact: input.impact,
     recommendation: input.recommendation,
@@ -78,18 +100,30 @@ export function createRuleEngine(): GuardianRule[] {
   const silentCatch: GuardianRule = {
     id: 'EG-001', category: 'reliability', defaultSeverity: 'P1',
     analyze: ({ filePath, content }) => {
+      const masked = maskLiteralsAndComments(content);
       const findings: Finding[] = [];
-      const expression = /\bcatch\s*(?:\([^)]*\)\s*)?\{/g;
+      const seen = new Map<string, number>();
+      const catchKeyword = /\bcatch\b/g;
       let match: RegExpExecArray | null;
-      while ((match = expression.exec(content)) !== null) {
-        const open = match.index + match[0].lastIndexOf('{');
-        const close = matchingBrace(content, open);
+      while ((match = catchKeyword.exec(masked)) !== null) {
+        let cursor = match.index + match[0].length;
+        while (cursor < masked.length && /\s/.test(masked[cursor])) cursor += 1;
+        if (masked[cursor] === '(') {
+          const parenClose = matchingParen(masked, cursor);
+          if (parenClose < 0) continue;
+          cursor = parenClose + 1;
+          while (cursor < masked.length && /\s/.test(masked[cursor])) cursor += 1;
+        }
+        if (masked[cursor] !== '{') continue;
+        const close = matchingBrace(masked, cursor);
         if (close < 0) continue;
-        const body = content.slice(open + 1, close).replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|\s)\/\/[^\n]*/g, '').trim();
-        if (body.length > 0) continue;
+        // Masked bodies contain no comments or string literals, so a body of
+        // only whitespace is a genuinely empty block.
+        if (masked.slice(cursor + 1, close).trim().length > 0) continue;
+        const evidence = content.slice(match.index, close + 1);
         findings.push(makeFinding({
-          ruleId: 'EG-001', file: filePath, content, offset: match.index,
-          evidence: content.slice(match.index, close + 1), occurrence: findings.length,
+          ruleId: 'EG-001', file: filePath, content, offset: match.index, endOffset: close + 1,
+          evidence, duplicateIndex: duplicateIndexOf(seen, evidence),
           title: 'Empty catch block',
           description: 'The catch block discards the caught error without handling or propagating it.',
           severity: 'P1', confidence: 'high', category: 'reliability',
@@ -104,13 +138,16 @@ export function createRuleEngine(): GuardianRule[] {
   const doubleAssertion: GuardianRule = {
     id: 'EG-002', category: 'typing', defaultSeverity: 'P2',
     analyze: ({ filePath, content }) => {
+      const masked = maskLiteralsAndComments(content);
       const findings: Finding[] = [];
+      const seen = new Map<string, number>();
       const expression = /\bas\s+unknown\s+as\s+[A-Za-z_$][\w$]*(?:\s*<[^;\n]+>)?(?:\[\])?/g;
       let match: RegExpExecArray | null;
-      while ((match = expression.exec(content)) !== null) {
+      while ((match = expression.exec(masked)) !== null) {
+        const evidence = content.slice(match.index, match.index + match[0].length);
         findings.push(makeFinding({
-          ruleId: 'EG-002', file: filePath, content, offset: match.index,
-          evidence: match[0], occurrence: findings.length,
+          ruleId: 'EG-002', file: filePath, content, offset: match.index, endOffset: match.index + match[0].length,
+          evidence, duplicateIndex: duplicateIndexOf(seen, evidence),
           title: 'Suspicious double type assertion',
           description: 'Casting through unknown bypasses TypeScript compatibility checks.',
           severity: 'P2', confidence: 'medium', category: 'typing',
@@ -123,24 +160,49 @@ export function createRuleEngine(): GuardianRule[] {
   };
 
   const prismaQueryInLoop: GuardianRule = {
-    id: 'EG-003', category: 'prisma', defaultSeverity: 'P2',
+    id: 'EG-003', category: 'performance', defaultSeverity: 'P2',
     analyze: ({ filePath, content, project }) => {
       if (!project.prismaVersion) return [];
+      const masked = maskLiteralsAndComments(content);
       const findings: Finding[] = [];
-      const loops = /\b(?:for|while)\s*(?:\([^)]*\)|\([^)]*\)\s*)\s*\{/g;
+      const seen = new Map<string, number>();
+      const loopKeyword = /\bfor(?:\s+await)?\b|\bwhile\b/g;
+      const query = /\b(?:prisma|db|database)\s*\.\s*\w+\s*\.\s*(?:findMany|findFirst|findUnique|create|createMany|update|updateMany|delete|deleteMany|upsert|count|aggregate)\s*\(/g;
       let loop: RegExpExecArray | null;
-      while ((loop = loops.exec(content)) !== null) {
-        const open = loop.index + loop[0].lastIndexOf('{');
-        const close = matchingBrace(content, open);
-        if (close < 0) continue;
-        const body = content.slice(open + 1, close);
-        const query = /\b(?:prisma|db|database)\s*\.\s*\w+\s*\.\s*(?:findMany|findFirst|findUnique|create|createMany|update|updateMany|delete|deleteMany|upsert|count|aggregate)\s*\(/g;
+      while ((loop = loopKeyword.exec(masked)) !== null) {
+        if (loop[0].startsWith('while')) {
+          // Skip do..while: its body precedes the keyword.
+          let before = loop.index - 1;
+          while (before >= 0 && /\s/.test(masked[before])) before -= 1;
+          if (before >= 0 && masked[before] === '}') continue;
+        }
+        let cursor = loop.index + loop[0].length;
+        while (cursor < masked.length && /\s/.test(masked[cursor])) cursor += 1;
+        if (masked[cursor] !== '(') continue;
+        const parenClose = matchingParen(masked, cursor);
+        if (parenClose < 0) continue;
+        let bodyStart = parenClose + 1;
+        while (bodyStart < masked.length && /\s/.test(masked[bodyStart])) bodyStart += 1;
+        let bodyEnd: number;
+        if (masked[bodyStart] === '{') {
+          const close = matchingBrace(masked, bodyStart);
+          if (close < 0) continue;
+          bodyStart += 1;
+          bodyEnd = close;
+        } else {
+          // Single-statement loop body: everything up to the next semicolon.
+          const semi = masked.indexOf(';', bodyStart);
+          if (semi < 0) continue;
+          bodyEnd = semi;
+        }
+        const body = masked.slice(bodyStart, bodyEnd);
         const call = query.exec(body);
         if (!call) continue;
-        const offset = open + 1 + call.index;
+        const offset = bodyStart + call.index;
+        const evidence = content.slice(offset, offset + call[0].length);
         findings.push(makeFinding({
-          ruleId: 'EG-003', file: filePath, content, offset,
-          evidence: call[0], occurrence: findings.length,
+          ruleId: 'EG-003', file: filePath, content, offset, endOffset: offset + call[0].length,
+          evidence, duplicateIndex: duplicateIndexOf(seen, evidence),
           title: 'Prisma query inside a loop candidate',
           description: 'A Prisma Client query appears inside a loop and may issue one database round trip per iteration.',
           severity: 'P2', confidence: 'medium', category: 'performance',
@@ -156,14 +218,28 @@ export function createRuleEngine(): GuardianRule[] {
   return [silentCatch, doubleAssertion, prismaQueryInLoop];
 }
 
+/** Expands glob brace alternates ({ts,tsx}) so include/exclude patterns behave
+ *  the way the config file documents them. */
+function expandBraces(pattern: string): string[] {
+  const match = pattern.match(/\{([^{}]+)\}/);
+  if (!match) return [pattern];
+  const [full, inner] = match;
+  return inner.split(',').flatMap((option) => expandBraces(pattern.replace(full, option)));
+}
+
 function globToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-    .replace(/\*\*/g, '§§')
-    .replace(/\*/g, '[^/]*')
-    .replace(/§§\//g, '(?:.*/)?')
-    .replace(/§§/g, '.*')
-    .replace(/\?/g, '.');
-  return new RegExp(`^${escaped}$`);
+  const body = expandBraces(pattern.replace(/\\/g, '/'))
+    .map((alternative) => alternative
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      // Glob ? must become [^/] BEFORE the ** placeholders insert their own
+      // ? quantifiers, otherwise (?:.*/)? gets corrupted.
+      .replace(/\?/g, '[^/]')
+      .replace(/\*\*/g, '§§')
+      .replace(/\*/g, '[^/]*')
+      .replace(/§§\//g, '(?:.*/)?')
+      .replace(/§§/g, '.*'))
+    .join('|');
+  return new RegExp(`^${body}$`);
 }
 
 function matchesAny(file: string, patterns: string[] = []): boolean {
@@ -190,51 +266,61 @@ export function listFiles(root: string, exclusions: string[] = DEFAULT_EXCLUSION
   return results.sort();
 }
 
+/** Resolves user-provided scan targets: files pass through, directories are
+ *  expanded recursively (honoring exclusions), and every rejected input is
+ *  reported as a warning instead of being silently dropped. */
+function resolveInputFiles(inputs: string[], cwd: string, exclusions: string[], warnings: string[]): string[] {
+  const resolved = new Set<string>();
+  for (const input of inputs) {
+    const abs = resolve(cwd, input);
+    const stats = statSync(abs, { throwIfNoEntry: false });
+    if (!stats) {
+      warnings.push(`Path not found, ignored: ${input}`);
+      continue;
+    }
+    if (!abs.startsWith(`${cwd}${sep}`)) {
+      warnings.push(`Path outside the project directory, ignored: ${input}`);
+      continue;
+    }
+    if (stats.isFile()) {
+      resolved.add(relative(cwd, abs).split(sep).join('/'));
+    } else if (stats.isDirectory()) {
+      const relDir = relative(cwd, abs).split(sep).join('/');
+      for (const rel of listFiles(abs, exclusions)) {
+        resolved.add(relDir ? `${relDir}/${rel}` : rel);
+      }
+    } else {
+      warnings.push(`Not a scannable file or directory, ignored: ${input}`);
+    }
+  }
+  return [...resolved].filter((file) => SOURCE_EXTENSIONS.has(extname(file).toLowerCase())).sort();
+}
+
 export function runDeterministicScan(options: ScanOptions | string = {}): Finding[] {
   const normalized: ScanOptions = typeof options === 'string' ? { cwd: options } : options;
   const cwd = resolve(normalized.cwd ?? process.cwd());
   const project = normalized.project ?? detectProjectProfile(cwd);
+  const warnings = normalized.warnings ?? [];
   const exclusions = [...DEFAULT_EXCLUSIONS, ...(normalized.exclude ?? [])];
-  const files = normalized.files
-    ? normalized.files.map((file) => resolve(cwd, file)).filter((file) => file.startsWith(`${cwd}${sep}`) && statSync(file, { throwIfNoEntry: false })?.isFile()).map((file) => relative(cwd, file).split(sep).join('/'))
+  const files = normalized.files?.length
+    ? resolveInputFiles(normalized.files, cwd, exclusions, warnings)
     : listFiles(cwd, exclusions);
   const rules = createRuleEngine();
   const findings: Finding[] = [];
+  let scanned = 0;
 
   for (const file of files) {
     if (!SOURCE_EXTENSIONS.has(extname(file).toLowerCase())) continue;
     if (matchesAny(file, exclusions) || (normalized.include?.length && !matchesAny(file, normalized.include))) continue;
     let content: string;
     try { content = readFileSync(resolve(cwd, file), 'utf8'); } catch { continue; }
+    scanned += 1;
     const context: RuleContext = { project, filePath: file, content };
     for (const rule of rules) findings.push(...rule.analyze(context));
   }
-  return findings.sort((a, b) => a.location.file.localeCompare(b.location.file) || a.location.line - b.location.line || a.ruleId.localeCompare(b.ruleId));
-}
 
-export function getChangedFiles(cwd = process.cwd(), base?: string): string[] {
-  const args = ['diff', '--name-only', '-z'];
-  if (base) args.push(`${base}...HEAD`);
-  args.push('--');
-  const output = execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-  return [...new Set(output.split('\0').filter(Boolean).map((file) => file.replace(/\\/g, '/')))]
-    .filter((file) => SOURCE_EXTENSIONS.has(extname(file).toLowerCase()));
-}
-
-export function getGitStatus(cwd = process.cwd()): { branch: string | null; dirty: boolean } {
-  try {
-    const branch = execFileSync('git', ['branch', '--show-current'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    const status = execFileSync('git', ['status', '--porcelain'], { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-    return { branch: branch || null, dirty: status.length > 0 };
-  } catch {
-    return { branch: null, dirty: false };
+  if (files.length > 0 && scanned === 0) {
+    warnings.push('All candidate files were filtered out by include/exclude patterns; the gate was evaluated on zero files.');
   }
-}
-
-export function ruleIdForSeverity(finding: Finding): Severity {
-  return finding.severity;
-}
-
-export function getFileName(file: string): string {
-  return basename(file);
+  return findings.sort((a, b) => a.location.file.localeCompare(b.location.file) || a.location.line - b.location.line || a.ruleId.localeCompare(b.ruleId));
 }

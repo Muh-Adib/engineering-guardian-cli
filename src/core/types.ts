@@ -7,6 +7,7 @@ export interface Location {
   line: number;
   column?: number;
   endLine?: number;
+  endColumn?: number;
 }
 
 export interface Finding {

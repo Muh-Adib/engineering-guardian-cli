@@ -1,8 +1,12 @@
 {
   "name": "engineering-guardian-cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "bin": { "eg": "./dist/index.js" },
   "scripts": {
     "build": "tsc -p tsconfig.json",
@@ -11,7 +15,8 @@
     "scan": "tsx src/index.ts scan",
     "verify": "tsx src/index.ts verify",
     "lint": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "self-scan": "tsx src/index.ts scan"
   },
   "dependencies": {
     "commander": "^12.1.0"
