@@ -1,58 +1,53 @@
 # Engineering Guardian CLI
 
-Engineering Guardian is a local-first engineering-quality CLI for Next.js 16 and Prisma projects. It performs deterministic scans, reports evidence-backed findings, and supports opt-in AI repair flows with explicit human approval.
-
-This repository is an MVP implementation scaffold aligned to the product requirements document in `engineering-guardian-prd.md`.
-
-## Goals
-
-- detect project structure and stack versions without mutating the repository
-- run deterministic scans for common reliability, typing, Next.js, and Prisma risks
-- separate confirmed issues from contextual review suggestions
-- support CLI output, JSON, and future SARIF compatibility
-- keep AI-assisted repair preview-only and require explicit approval
+Engineering Guardian (`eg`) is a local-first, deterministic quality scanner focused on Next.js and Prisma projects. It produces evidence-backed findings and can gate CI based on configured severity and confidence. It does not claim that a clean scan proves an application is secure.
 
 ## Quick start
 
-```bash
+```sh
 npm install
 npm run build
-npm run doctor
-npm run scan
+node dist/index.js doctor
+node dist/index.js scan --format json
 ```
+
+Initialize project policy with `eg init` (or `npx tsx src/index.ts init` while developing). This creates `.guardian/config.json` and manages only the marked section of `AGENTS.md`.
 
 ## Commands
 
-```bash
-npx eg init
-npx eg doctor
-npx eg scan
-npx eg scan --changed
-npx eg explain --id EG-001
-npx eg fix --id EG-001
-npx eg verify
+```sh
+eg doctor
+eg scan
+eg scan --changed
+eg scan --changed --base origin/main --format sarif --out guardian.sarif
+eg scan --path src/app/api --format json
+eg explain --id EG-001-<fingerprint>
+eg fix --id EG-001-<fingerprint>   # guidance/preview only
+eg verify                         # discovers scripts; does not execute them
 ```
 
-## Current status
+`scan` accepts `text`, `json`, or `sarif`. Exit codes: `0` scan passes configured gate, `1` findings breach the gate (or a requested finding is absent), `2` invalid options or scan error. `--base` requires `--changed`. Git is invoked with fixed argument arrays; no shell command from the project or model is executed.
 
-This repository contains the core MVP skeleton and initial rule engine. The implementation is intentionally deterministic and rules-driven, with clear extension points for version-aware Next.js and Prisma checks.
+## Current rules
 
-## Project structure
+| Rule | Purpose | Default |
+|---|---|---|
+| EG-001 | Empty catch block | P1 / high confidence |
+| EG-002 | `as unknown as T` type assertion candidate | P2 / medium confidence |
+| EG-003 | Prisma Client query inside loop candidate | P2 / medium confidence |
 
-- `src/cli` — command parsing and UX
-- `src/core` — config and finding types
-- `src/discovery` — project detection
-- `src/analyzers` — deterministic scan rules
-- `src/reporters` — terminal and machine output
-- `src/templates` — config and AGENTS scaffolding
+These are deliberately small heuristics, not an AST-based proof system. Review findings in context. Some syntax edge cases may be missed; use the repository's ESLint, TypeScript, tests, and security tools as complementary checks.
 
-## Safety model
+## Policy
 
-- AI actions are disabled by default
-- patch generation is preview-only
-- no arbitrary shell execution is permitted
-- findings are evidence-based and confidence-aware
+`.guardian/config.json` controls scan paths and gate severity/confidence. The default gate fails on high-confidence P0/P1 only. Scan is read-only except when `--out` writes a report and `eg init` creates/updates Guardian configuration/instructions. `verify` only reports discovered scripts and does not execute them.
 
-## Documentation
+## Safety and limitations
 
-See `engineering-guardian-prd.md` for the full product requirements and implementation plan.
+- AI is disabled and no AI repair provider is implemented yet.
+- `eg fix` only displays guidance; even `--apply` does not write files.
+- No database connections, migrations, dependency installs, or arbitrary shell commands are performed.
+- `--changed` scans Git diff paths; untracked files are not included by `git diff`.
+- SARIF support is basic; validate against your CI platform before relying on it as a compliance artifact.
+
+See [the PRD](engineering-guardian-prd.md) and [competitive gap analysis](docs/competitive-gap-analysis.md).
